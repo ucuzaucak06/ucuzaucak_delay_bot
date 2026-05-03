@@ -21,8 +21,8 @@ from telegram.ext import (
 )
 
 # ---------- Ayarlar ----------
-TELEGRAM_TOKEN = os.environ["8746764965:AAHDnbei4jBFP2svD_334-X3_vLlioIjwU8"]
-AVIATIONSTACK_KEY = os.environ["6d3cd4523b4aa3f4c5148f504124ab24"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+AVIATIONSTACK_KEY = os.environ["AVIATIONSTACK_KEY"]
 DELAY_THRESHOLD_MIN = int(os.environ.get("DELAY_THRESHOLD_MIN", "60"))
 POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "900"))  # 15 dk
 
