@@ -72,26 +72,40 @@ def fetch_departures(iata: str, flight_date: str) -> list[dict]:
 
 def compute_delay_minutes(flight: dict) -> int:
     """
-    AviationStack 'departure.delay' alanı dakika cinsinden gecikme verir (varsa).
-    Yoksa scheduled vs estimated/actual farkından hesaplar.
+    Önce actual (kalkmış uçuş) → estimated (tahmini) → delay alanı sırasıyla bakar.
+    AviationStack ücretsiz tier'da delay alanı sıklıkla null gelir.
     """
     dep = flight.get("departure") or {}
+    sched = dep.get("scheduled")
+
+    # En güvenilir: scheduled vs actual (uçuş kalkmışsa)
+    actual = dep.get("actual")
+    if sched and actual:
+        try:
+            s = datetime.fromisoformat(sched.replace("Z", "+00:00"))
+            a = datetime.fromisoformat(actual.replace("Z", "+00:00"))
+            return int((a - s).total_seconds() // 60)
+        except Exception:
+            pass
+
+    # Sonra: scheduled vs estimated (kalkmadıysa tahmini)
+    est = dep.get("estimated")
+    if sched and est:
+        try:
+            s = datetime.fromisoformat(sched.replace("Z", "+00:00"))
+            e = datetime.fromisoformat(est.replace("Z", "+00:00"))
+            return int((e - s).total_seconds() // 60)
+        except Exception:
+            pass
+
+    # Son çare: delay alanı (string veya int olabilir)
     if dep.get("delay") is not None:
         try:
             return int(dep["delay"])
         except (TypeError, ValueError):
             pass
 
-    sched = dep.get("scheduled")
-    est = dep.get("estimated") or dep.get("actual")
-    if not sched or not est:
-        return 0
-    try:
-        s = datetime.fromisoformat(sched.replace("Z", "+00:00"))
-        e = datetime.fromisoformat(est.replace("Z", "+00:00"))
-        return int((e - s).total_seconds() // 60)
-    except Exception:
-        return 0
+    return 0
 
 
 def format_alert(flight: dict, delay: int) -> str:
@@ -269,6 +283,89 @@ async def cmd_liste(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Aktif izlemeler:\n" + "\n".join(lines))
 
 
+async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /debug SAW 2026-05-04 [PC316]
+    Belirli havalimanı/tarih için API'nin döndürdüğü uçuşları gösterir.
+    Opsiyonel 3. argüman: belirli bir uçuş numarası (örn. PC316)
+    """
+    args = ctx.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Kullanım: `/debug SAW 2026-05-04` veya `/debug SAW 2026-05-04 PC316`",
+            parse_mode="Markdown",
+        )
+        return
+    iata, date_str = args[0].upper(), args[1]
+    flight_filter = args[2].upper() if len(args) >= 3 else None
+
+    await update.message.reply_text(f"⏳ {iata} {date_str} için API çağrılıyor...")
+
+    try:
+        flights = fetch_departures(iata, date_str)
+    except Exception as e:
+        await update.message.reply_text(f"❌ API hatası: {e}")
+        return
+
+    await update.message.reply_text(
+        f"✅ API'den {len(flights)} uçuş döndü."
+    )
+
+    # Filtre varsa o uçuşları bul
+    if flight_filter:
+        matched = [
+            f for f in flights
+            if (f.get("flight") or {}).get("iata", "").upper() == flight_filter
+            or (f.get("flight") or {}).get("number", "").upper() == flight_filter.replace("PC", "")
+        ]
+        if not matched:
+            # Geniş arama: numarayla başlayanlar
+            matched = [
+                f for f in flights
+                if flight_filter in (f.get("flight") or {}).get("iata", "").upper()
+            ]
+        if not matched:
+            await update.message.reply_text(
+                f"❌ {flight_filter} listede yok. İlk 5 uçuş numarası: " +
+                ", ".join((f.get("flight") or {}).get("iata", "?") for f in flights[:5])
+            )
+            return
+
+        for fl in matched[:3]:
+            dep = fl.get("departure") or {}
+            arr = fl.get("arrival") or {}
+            f_info = fl.get("flight") or {}
+            delay = compute_delay_minutes(fl)
+            msg = (
+                f"🔍 *{f_info.get('iata', '?')}*\n"
+                f"Hedef: {arr.get('iata', '?')}\n"
+                f"Status: `{fl.get('flight_status', '?')}`\n"
+                f"scheduled: `{dep.get('scheduled', '-')}`\n"
+                f"estimated: `{dep.get('estimated', '-')}`\n"
+                f"actual: `{dep.get('actual', '-')}`\n"
+                f"delay alanı: `{dep.get('delay', '-')}`\n"
+                f"*Hesaplanan gecikme: {delay} dk*"
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        # Filtre yok: en gecikmeli 5 uçuşu göster
+        with_delay = []
+        for fl in flights:
+            d = compute_delay_minutes(fl)
+            with_delay.append((d, fl))
+        with_delay.sort(key=lambda x: -x[0])
+
+        lines = ["*En gecikmeli 5 uçuş:*"]
+        for d, fl in with_delay[:5]:
+            f_info = fl.get("flight") or {}
+            arr = (fl.get("arrival") or {}).get("iata", "?")
+            status = fl.get("flight_status", "?")
+            lines.append(
+                f"• `{f_info.get('iata', '?')}` → {arr} | {d} dk | {status}"
+            )
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 # ---------- Yeniden başlatmada izlemeleri geri yükle ----------
 async def post_init(app: Application):
     state = load_state()
@@ -307,6 +404,7 @@ def main():
     app.add_handler(CommandHandler("izle", cmd_izle))
     app.add_handler(CommandHandler("durdur", cmd_durdur))
     app.add_handler(CommandHandler("liste", cmd_liste))
+    app.add_handler(CommandHandler("debug", cmd_debug))
     log.info("Bot başlıyor...")
     app.run_polling()
 
